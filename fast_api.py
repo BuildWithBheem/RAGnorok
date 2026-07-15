@@ -3,7 +3,7 @@ import hashlib
 import ollama
 from sentence_transformers import SentenceTransformer
 import faiss
-from fastapi import FastAPI,UploadFile,File
+from fastapi import FastAPI,UploadFile,File,Depends
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import uuid
 import numpy as np
@@ -11,6 +11,7 @@ from pydantic import BaseModel
 import mysql.connector
 import os
 import re
+from Authenticate import get_user,api_key_generator
 app = FastAPI()
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -28,14 +29,26 @@ sql_comm = connection.cursor()  # Execution of commands
 class Queries(BaseModel):
     query : str
 
+class User(BaseModel):
+    user_name : str
+
 if os.path.exists("vector_db/index.faiss"):
     index = faiss.read_index("vector_db/index.faiss")
 else:
     index = faiss.IndexIDMap(faiss.IndexFlatL2(384))
 
+@app.post("/create_key")
+def authenticate_user(usr_name: User):
+    get_id = api_key_generator(usr_name.user_name)
+
+    return {"api_key": get_id}
+
 @app.post("/upload_file")
 
-async def pdf_upload(input: UploadFile = File(...)):
+async def pdf_upload(input: UploadFile = File(...),auth : int = Depends(get_user)):
+    if auth is None:
+        return {"result": "API KEY NOT FOUND !"}
+    file_bytes = await input.read()
     pdf = PdfReader(input.file)
 
     text = ""
@@ -59,7 +72,6 @@ async def pdf_upload(input: UploadFile = File(...)):
     embeddings = embeddings.astype('float32')
 
     # Generating vector IDs
-    file_bytes = await input.read()
     document_id = hashlib.sha256(file_bytes).hexdigest()[:32]
     sql_comm.execute("select * from chunk where document_id = %s LIMIT 1",(document_id,))
     if sql_comm.fetchone():
@@ -91,7 +103,9 @@ async def pdf_upload(input: UploadFile = File(...)):
     return{"Result": "Uploaded !"}
 
 @app.post("/ask")
-def Query(user_query: Queries):
+def Query(user_query: Queries, auth: int = Depends(get_user)):
+    if auth is None:
+        return {"result": "API KEY NOT FOUND !"}
     ask = user_query.query
     embed_qry = model.encode([ask]).astype(np.float32)
 
