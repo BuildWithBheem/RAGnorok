@@ -1,4 +1,5 @@
 from pypdf import PdfReader
+import hashlib
 import ollama
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -8,11 +9,12 @@ import uuid
 import numpy as np
 from pydantic import BaseModel
 import mysql.connector
-
+import os
+import re
 app = FastAPI()
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
-pswd = '********'
+pswd = 'bheem@3052006'
 
 connection = mysql.connector.connect(
     host = 'localhost',
@@ -23,12 +25,13 @@ connection = mysql.connector.connect(
 
 sql_comm = connection.cursor()  # Execution of commands
 
-faiss_db = faiss.IndexFlatL2(384)
-
-index = faiss.IndexIDMap(faiss_db)  # For vector ids
-
 class Queries(BaseModel):
     query : str
+
+if os.path.exists("vector_db/index.faiss"):
+    index = faiss.read_index("vector_db/index.faiss")
+else:
+    index = faiss.IndexIDMap(faiss.IndexFlatL2(384))
 
 @app.post("/upload_file")
 
@@ -56,8 +59,11 @@ async def pdf_upload(input: UploadFile = File(...)):
     embeddings = embeddings.astype('float32')
 
     # Generating vector IDs
-    
-    document_id = uuid.uuid4().hex
+    file_bytes = await input.read()
+    document_id = hashlib.sha256(file_bytes).hexdigest()[:32]
+    sql_comm.execute("select * from chunk where document_id = %s LIMIT 1",(document_id,))
+    if sql_comm.fetchone():
+        return {"result": "PDF already Exists !"}
     vector_ids = np.array([uuid.uuid4().int >> 65 for i in range(len(chunks))],dtype = np.int64)
     # Put unique 64 bit ids in an array
 
@@ -80,9 +86,12 @@ async def pdf_upload(input: UploadFile = File(...)):
         )
 
     connection.commit()
+    faiss.write_index(index,"vector_db/uid")
+
+    return{"Result": "Uploaded !"}
 
 @app.post("/ask")
-async def Query(user_query: Queries):
+def Query(user_query: Queries):
     ask = user_query.query
     embed_qry = model.encode([ask]).astype(np.float32)
 
@@ -108,13 +117,16 @@ async def Query(user_query: Queries):
         messages= [
            { 
             'role' : 'system',
-            'content' : "You are a PDF Assistant, answer to the user's queries according to the context only"
+            'content' : """You are a PDF Assistant, answer to the user's queries according to the context only. 
+            Keep the answers short and simple"""
            },
            {
                'role' : 'user',
                'content': f"question: {ask}, context: {context}"
            }
-        ]
+        ],
+        options = {"temperature": 0.4}  # Keep answers grounded and improvise if no info is found
     )
-
-    return {"response": response["message"]["content"]}
+    response_refined = response["message"]["content"]
+    response_refined = re.sub("\n+"," ", response_refined).strip()
+    return {"response": response_refined}
