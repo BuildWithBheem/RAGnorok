@@ -1,11 +1,12 @@
 import mysql.connector
 from fastapi import HTTPException,Header
-pswd = "bheem@3052006"
+pswd = "***********"
 connection = mysql.connector.connect(
 host = 'localhost',
     user = 'root',
     password = pswd,
-    database = 'rag_db'
+    database = '***********'
+
 )
 
 sql_comm = connection.cursor()

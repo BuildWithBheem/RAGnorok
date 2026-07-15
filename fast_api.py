@@ -15,13 +15,13 @@ from Authenticate import get_user,api_key_generator
 app = FastAPI()
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
-pswd = 'bheem@3052006'
+pswd = '********'
 
 connection = mysql.connector.connect(
     host = 'localhost',
     user = 'root',
     password = pswd,
-    database = 'rag_db'
+    database = '*********'
 )
 
 sql_comm = connection.cursor()  # Execution of commands
