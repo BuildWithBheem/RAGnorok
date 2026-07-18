@@ -3,7 +3,8 @@ import hashlib
 import ollama
 from sentence_transformers import SentenceTransformer
 import faiss
-from fastapi import FastAPI,UploadFile,File,Depends
+from fastapi import FastAPI,UploadFile,File,Depends,Form
+from fastapi.middleware.cors import CORSMiddleware
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import uuid
 import numpy as np
@@ -11,45 +12,56 @@ from pydantic import BaseModel
 import mysql.connector
 import os
 import re
+import io
 from Authenticate import get_user,api_key_generator
+
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 model = SentenceTransformer("all-MiniLM-L6-v2")
-pswd = '********'
+pswd = '********************'
 
 connection = mysql.connector.connect(
     host = 'localhost',
     user = 'root',
     password = pswd,
-    database = '*********'
+    database = 'rag_db'
 )
 
 sql_comm = connection.cursor()  # Execution of commands
 
 class Queries(BaseModel):
     query : str
-
-class User(BaseModel):
     user_name : str
-
-if os.path.exists("vector_db/index.faiss"):
-    index = faiss.read_index("vector_db/index.faiss")
-else:
-    index = faiss.IndexIDMap(faiss.IndexFlatL2(384))
-
+    doc_id:str
+class create_user(BaseModel):
+    user : str
 @app.post("/create_key")
-def authenticate_user(usr_name: User):
-    get_id = api_key_generator(usr_name.user_name)
+def authenticate_user(usr_name: create_user):
+    sql_comm.execute('''select id from users where username = %s''',(usr_name.user,))
 
-    return {"api_key": get_id}
+    if not sql_comm.fetchone():
+        get_id = api_key_generator(usr_name.user,)
+        return {"api_key": get_id}
+    else:
+        return {"User": "A username like this already exists"}
 
 @app.post("/upload_file")
 
-async def pdf_upload(input: UploadFile = File(...),auth : int = Depends(get_user)):
+async def pdf_upload(input: UploadFile = File(...),usr_name : str = Form(...),auth : int = Depends(get_user)):
     if auth is None:
         return {"result": "API KEY NOT FOUND !"}
-    file_bytes = await input.read()
-    pdf = PdfReader(input.file)
+    
+    user_id = auth
+
+    file_bytes = await input.read() # Reaches EOF
+    pdf = PdfReader(io.BytesIO(file_bytes)) # To read the file from the beginning
 
     text = ""
 
@@ -73,12 +85,16 @@ async def pdf_upload(input: UploadFile = File(...),auth : int = Depends(get_user
 
     # Generating vector IDs
     document_id = hashlib.sha256(file_bytes).hexdigest()[:32]
-    sql_comm.execute("select * from chunk where document_id = %s LIMIT 1",(document_id,))
+    sql_comm.execute("select * from chunk where document_id = %s and id = %s LIMIT 1",(document_id,user_id))
     if sql_comm.fetchone():
         return {"result": "PDF already Exists !"}
     vector_ids = np.array([uuid.uuid4().int >> 65 for i in range(len(chunks))],dtype = np.int64)
     # Put unique 64 bit ids in an array
 
+    if os.path.exists(f"vector_db/user{user_id}"):
+        index = faiss.read_index(f"vector_db/user{user_id}")
+    else:
+        index = faiss.IndexIDMap(faiss.IndexFlatL2(384))
 
     # Insert into MySQL database
 
@@ -92,14 +108,14 @@ async def pdf_upload(input: UploadFile = File(...),auth : int = Depends(get_user
                            )
         sql_comm.execute(
             """
-            INSERT INTO CHUNK (vector_id, document_id, chunk_text)
-            VALUES (%s ,%s ,%s)
-            """, (int(vector_id),document_id,chunks[i])
+            INSERT INTO CHUNK (vector_id, document_id, chunk_text,id)
+            VALUES (%s ,%s ,%s,%s)
+            """, (int(vector_id),document_id,chunks[i],user_id)
         )
 
     connection.commit()
-    faiss.write_index(index,"vector_db/uid")
 
+    faiss.write_index(index,f"vector_db/user{user_id}")
     return{"Result": "Uploaded !"}
 
 @app.post("/ask")
@@ -109,18 +125,26 @@ def Query(user_query: Queries, auth: int = Depends(get_user)):
     ask = user_query.query
     embed_qry = model.encode([ask]).astype(np.float32)
 
+    user_id = auth
+    index = faiss.read_index(f"vector_db/user{user_id}")
     D, I = index.search(embed_qry,5)
 
     vector_ids = I[0]
 
     vector_ids = [int(i) for i in vector_ids if i!= -1]   # Prevents edge case of unable to find chunks
 
+    if not vector_ids:
+        return {"response": "I couldn't find any relevant information in this document."}
+    
     chunk_numbers = ",".join(["%s"]*len(vector_ids)) # Creates (%s,%s,%s...upto len(vector_ids))
-
     sql_comm.execute(
         f"""
-    SELECT chunk_text FROM chunk WHERE vector_id IN ({chunk_numbers})
-        """, vector_ids
+    SELECT chunk_text
+FROM chunk
+WHERE vector_id IN ({chunk_numbers})
+  AND id = %s
+  AND document_id = %s
+        """, (*vector_ids,user_id,user_query.doc_id)
     )
 
     retr_chunks = sql_comm.fetchall()
